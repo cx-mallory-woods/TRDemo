@@ -60,15 +60,25 @@ def format_file_size(context, size_bytes):
 
 @contextfilter
 def role_badge(context, role):
-    """Generate role badge HTML"""
-    from markupsafe import escape
+    """Generate role badge HTML.
+
+    Returns a Markup object so Jinja2 auto-escaping treats the wrapper HTML as
+    intentionally safe while all user-controlled values (role) have been
+    escaped via markupsafe.escape() before being embedded.  Returning Markup
+    here means the template does NOT need the |safe filter, which eliminates
+    the auto-escape bypass that enabled Stored XSS.
+    """
+    from markupsafe import escape, Markup
     role_colors = {
         'admin': 'danger',
         'project_manager': 'primary',
         'team_member': 'secondary'
     }
-    # Escape the role value to prevent XSS attacks
-    safe_role = escape(role) if role else ''
+    # escape() HTML-encodes all special characters in the database-sourced role
+    # value before it is embedded in the returned HTML fragment.
+    safe_role = escape(role) if role else Markup('')
     color = role_colors.get(role, 'secondary')
-    return f'<span class="badge badge-{color}">{safe_role}</span>'
+    # Wrap the result in Markup so Jinja2 auto-escaping does not double-encode
+    # the intentional HTML, and so the template can drop the |safe bypass.
+    return Markup(f'<span class="badge badge-{color}">{safe_role}</span>')
 
